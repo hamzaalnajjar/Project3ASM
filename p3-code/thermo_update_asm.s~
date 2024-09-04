@@ -1,0 +1,90 @@
+.text 
+.global set_temp_from_ports
+.global thermo_update
+
+# Update the thermometer display to reflect the current temperature reading
+thermo_update:
+        pushq   %rdx            # Save the value of the 64-bit register on the stack
+        pushq   $0              # Initialize a temp_t struct with zero and push onto the stack, with %rsp pointing to it
+        movq    %rsp, %rdi      # Prepare the first argument as the address of temp
+
+        pushq   $0              # Initialize an integer for the display value as zero
+        movq    %rsp, %rsi      # Prepare the second argument as the address of display
+
+        call    set_temp_from_ports
+        cmpl    $1, %eax        # Compare the return value of set_temp_from_ports with 1
+        je      .ERROR2         # Jump to error handling if the comparison is equal
+
+        movl    (%rdi), %edi    # Load the value of temp into the first argument
+        call    set_display_from_temp
+        cmpl    $1, %eax        # Check if set_display_from_temp returned 1
+        je      .ERROR2         # Jump to error handling if it did
+        movl    (%rsi), %edx    # Load the value pointed to by display into edx
+        movl    %edx, THERMO_DISPLAY_PORT(%rip)   # Write the value of display to the THERMO_DISPLAY_PORT
+
+        popq    %rdi            # Retrieve the temp value from the stack
+        popq    %rsi            # Retrieve the display value from the stack
+        popq    %rdx            # Retrieve the saved register value from the stack
+
+        movl    $0, %eax
+        ret                     # Exit the function with a return value of 0
+
+    .ERROR2:
+        popq    %rdi            # Retrieve the temp value from the stack
+        popq    %rsi            # Retrieve the display value from the stack
+        popq    %rdx            # Retrieve the saved register value from the stack
+
+        movl    $1, %eax
+        ret                     # Exit the function with a return value of 1
+
+# Function to read the current temperature from hardware ports and update temp
+# Returns 0 if the temperature is within a valid range, otherwise returns 1
+set_temp_from_ports:
+        movb    THERMO_STATUS_PORT(%rip), %sil      # Retrieve the STATUS_PORT value into sil
+        movw    THERMO_SENSOR_PORT(%rip), %dx       # Retrieve the SENSOR_PORT value into dx
+
+        cmpw    $64000, %dx         # Compare SENSOR value with 64000
+        ja      .INVALID            # Jump if SENSOR value exceeds 64000 (unsigned comparison)
+
+    .CONVERT:
+        movw    %dx, %cx            # Copy SENSOR value to cx for conversion
+        shrw    $6, %cx             # Divide SENSOR by 64 to get tenths of degrees
+        # Logical shift right ensures upper bits are filled with zeros
+
+        movw    %dx, %r10w          # Copy SENSOR value to r10w for remainder calculation
+        andw    $63, %r10w          # Isolate the remainder by masking with 63
+
+        cmpw    $32, %r10w          # Check if the remainder is at least 32
+        jl     .NO_ROUNDUP          # Jump if remainder is less than 32
+        incw    %cx                 # Increment tenths_deg if rounding is needed
+    .NO_ROUNDUP:
+        addw    $-500, %cx          # Adjust tenths_deg by subtracting 500
+
+        testb   %sil, %sil          # Test if STATUS is non-zero
+        jnz     .CONVERT_FAHRENHEIT # Convert to Fahrenheit if STATUS is non-zero
+
+        movb    $0, 2(%rdi)         # Set is_fahrenheit flag to 0 in temp struct
+        movw    %cx, 0(%rdi)        # Update tenths_degree in temp struct
+        jmp      .END               # Proceed to function exit
+
+    .CONVERT_FAHRENHEIT:
+        movb    $1, 2(%rdi)         # Set is_fahrenheit flag to 1 in temp struct
+        imulw   $9, %cx             # Multiply tenths_deg by 9 for Fahrenheit conversion
+        movw    %cx, %ax            # Prepare ax for division
+        cwtl                        # Sign-extend ax to a long word
+        cltq                        # Sign-extend eax to a quad word
+        cqto                        # Sign-extend ax to dx for division
+        movw    $5, %r8w            # Prepare divisor as 5
+        idivw   %r8w                # Divide to complete Fahrenheit conversion
+        movw    %ax, %cx            # Update tenths_deg with the result
+        addw    $320, %cx           # Add 320 to tenths_deg for Fahrenheit offset
+        movw    %cx, 0(%rdi)        # Update tenths_degrees in temp struct
+        jmp      .END
+
+    .INVALID:                       # Handle invalid temperature readings
+        movq    $1, %rax            # Set return value to 1
+        ret
+
+    .END:
+        movq    $0, %rax            # Set return value to 0
+        ret
